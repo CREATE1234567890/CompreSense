@@ -1,0 +1,14 @@
+services:
+  pan25:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: pan25-genai-baselines:local
+    entrypoint: ["/usr/local/bin/pan25-baseline"]
+    command: ["--help"]
+    working_dir: /opt/pan25_genai_baselines
+    volumes:
+      - ./pan25-generative-ai-detection-task1-train:/data
+      - ./demo_out:/out
+    # Remove this line if you do not need GPU.
+    gpus: all
