@@ -1,0 +1,142 @@
+from pathlib import Path
+import json
+import typing as t
+
+import numpy as np
+import xgboost as xgb
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.model_selection import train_test_split
+
+from pan25_genai_baselines.advanced_features import extract_features
+from pan25_genai_baselines.detector_base import DetectorBase
+
+__all__ = ["AdvancedCompressionDetector"]
+
+
+def _parse_label(label_value) -> int:
+    """Map common PAN label formats to binary class (generated=1, human=0)."""
+    if isinstance(label_value, (int, np.integer, bool)):
+        return int(label_value)
+    if isinstance(label_value, float):
+        return int(round(label_value))
+
+    value = str(label_value).strip().lower()
+    if value in {"1", "true", "generated", "ai", "machine"}:
+        return 1
+    if value in {"0", "false", "human", "non-generated", "nongenerated"}:
+        return 0
+    raise ValueError(f"Unsupported label value: {label_value!r}")
+
+
+class AdvancedCompressionDetector(DetectorBase):
+    """Compression detector using PPMd/zlib features and an XGBoost classifier."""
+
+    _BASEDIR = Path(__file__).parent
+
+    def __init__(self, model_path: str | Path | None = None, **kwargs):
+        super().__init__(**kwargs)
+        if model_path is None:
+            model_path = self._BASEDIR / "compression_xgb_model.json"
+        self.model_path = Path(model_path)
+        if not self.model_path.exists():
+            raise FileNotFoundError(
+                f"Model file not found: {self.model_path}. "
+                "Train one first with AdvancedCompressionDetector.train(...)."
+            )
+        self.clf = xgb.XGBClassifier()
+        self.clf.load_model(self.model_path)
+
+    def _normalize_scores(self, scores):
+        return scores
+
+    def _get_score_impl(self, text: t.Iterable[str]) -> np.ndarray:
+        features = np.array([extract_features(item) for item in text], dtype=np.float32)
+        expected_features = int(self.clf.get_booster().num_features())
+        current_features = int(features.shape[1])
+
+        if current_features > expected_features:
+            features = features[:, :expected_features]
+        elif current_features < expected_features:
+            pad = np.zeros((features.shape[0], expected_features - current_features), dtype=np.float32)
+            features = np.concatenate([features, pad], axis=1)
+
+        return self.clf.predict_proba(features)[:, 1]
+
+    @classmethod
+    def train(
+        cls,
+        train_jsonl_path: str | Path,
+        model_out: str | Path | None = None,
+        test_size: float = 0.2,
+        random_state: int = 42,
+        device: str = "cpu",
+        class_weight_mode: str = "none",
+        class0_weight_multiplier: float = 1.0,
+    ) -> dict:
+        """Train and persist an XGBoost model from PAN JSONL data."""
+        X: list[list[float]] = []
+        y: list[int] = []
+
+        with Path(train_jsonl_path).open("r", encoding="utf-8") as f:
+            for line in f:
+                data = json.loads(line)
+                label = _parse_label(data["label"])
+                X.append(extract_features(data["text"]))
+                y.append(label)
+
+        X_np = np.array(X, dtype=np.float32)
+        y_np = np.array(y, dtype=np.int32)
+
+        X_train, X_val, y_train, y_val = train_test_split(
+            X_np,
+            y_np,
+            test_size=test_size,
+            random_state=random_state,
+            stratify=y_np,
+        )
+
+        clf_kwargs = dict(
+            n_estimators=300,
+            max_depth=4,
+            learning_rate=0.05,
+            subsample=0.9,
+            colsample_bytree=0.9,
+            objective="binary:logistic",
+            eval_metric="auc",
+            random_state=random_state,
+        )
+
+        if class_weight_mode == "balanced":
+            n0 = max(int((y_train == 0).sum()), 1)
+            n1 = max(int((y_train == 1).sum()), 1)
+            # XGBoost uses scale_pos_weight = weight(negative) / weight(positive).
+            scale_pos_weight = (n0 / n1) * class0_weight_multiplier
+            clf_kwargs["scale_pos_weight"] = scale_pos_weight
+        if device.startswith("cuda"):
+            clf_kwargs["device"] = device
+            clf_kwargs["tree_method"] = "hist"
+        else:
+            clf_kwargs["device"] = "cpu"
+
+        clf = xgb.XGBClassifier(**clf_kwargs)
+        clf.fit(X_train, y_train)
+
+        y_pred_proba = clf.predict_proba(X_val)[:, 1]
+        unique_val_classes = np.unique(y_val)
+        val_auc = float(roc_auc_score(y_val, y_pred_proba)) if len(unique_val_classes) >= 2 else float("nan")
+        y_val_pred = (y_pred_proba >= 0.5).astype(int)
+        metrics = {
+            "val_auc": val_auc,
+            "val_acc": float(accuracy_score(y_val, y_val_pred)),
+            "val_f1": float(f1_score(y_val, y_val_pred, zero_division=0)),
+            "n_samples": int(len(y_np)),
+            "n_class_0": int((y_np == 0).sum()),
+            "n_class_1": int((y_np == 1).sum()),
+        }
+        if class_weight_mode == "balanced":
+            metrics["scale_pos_weight"] = float(clf_kwargs["scale_pos_weight"])
+
+        model_out_path = Path(model_out) if model_out is not None else cls._BASEDIR / "compression_xgb_model.json"
+        clf.save_model(model_out_path)
+        metrics["model_out"] = str(model_out_path)
+        return metrics

@@ -1,0 +1,16 @@
+README.md
+pyproject.toml
+pan25_genai_baselines/__init__.py
+pan25_genai_baselines/binoculars.py
+pan25_genai_baselines/cli.py
+pan25_genai_baselines/detector_base.py
+pan25_genai_baselines/ppmd.py
+pan25_genai_baselines/tfidf.py
+pan25_genai_baselines/tfidf_model.pkl
+pan25_genai_baselines/util.py
+pan25_genai_baselines.egg-info/PKG-INFO
+pan25_genai_baselines.egg-info/SOURCES.txt
+pan25_genai_baselines.egg-info/dependency_links.txt
+pan25_genai_baselines.egg-info/entry_points.txt
+pan25_genai_baselines.egg-info/requires.txt
+pan25_genai_baselines.egg-info/top_level.txt

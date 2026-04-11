@@ -1,0 +1,2 @@
+[console_scripts]
+pan25-baseline = pan25_genai_baselines.cli:main
